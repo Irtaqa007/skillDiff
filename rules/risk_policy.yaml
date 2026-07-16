@@ -1,0 +1,23 @@
+# SkillDiff Risk Policy
+# Loaded at runtime by risk_engine.py
+# Modify this file to adjust scoring without touching code.
+
+severity_weights:
+  critical: 40
+  high: 20
+  medium: 10
+  low: 5
+  info: 0
+
+# Minimum cumulative score to reach each level
+thresholds:
+  none: 0
+  low: 10
+  medium: 25
+  high: 50
+  critical: 80
+
+# Permission risk overrides (optional future extension)
+# permission_overrides:
+#   shell.execute: critical
+#   filesystem.write: critical
