@@ -5,6 +5,7 @@ Commands:
   skilldiff compare <old> <new>   — Compare two skill files, print CLI report
   skilldiff report <old> <new>    — Generate JSON + HTML reports to disk
   skilldiff version               — Print version
+  skilldiff help                  — Print help
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from rich.console import Console
 from skilldiff import __version__
 from skilldiff.loader import LoadError, load_skill_file
 from skilldiff.normalizer import normalize
-from skilldiff.semantic_engine import compare as semantic_compare
+from skilldiff.semantic_engine import compare
 from skilldiff.risk_engine import score
 from skilldiff import report as reports
 
@@ -26,7 +27,7 @@ err_console = Console(stderr=True)
 
 
 def _run_diff(old_path: str, new_path: str):
-    """Shared pipeline: load -> normalize -> compare -> score."""
+    """Shared pipeline: load → normalize → compare → score."""
     try:
         old_raw = load_skill_file(old_path)
         new_raw = load_skill_file(new_path)
@@ -37,7 +38,7 @@ def _run_diff(old_path: str, new_path: str):
     old_model = normalize(old_raw)
     new_model = normalize(new_raw)
 
-    result = semantic_compare(old_model, new_model, old_path, new_path)
+    result = compare(old_model, new_model, old_path, new_path)
     result = score(result)
     return result
 
@@ -53,7 +54,7 @@ def main():
     """
 
 
-@main.command(name="compare")
+@main.command()
 @click.argument("old_skill", metavar="OLD")
 @click.argument("new_skill", metavar="NEW")
 def compare_cmd(old_skill: str, new_skill: str):
@@ -67,12 +68,16 @@ def compare_cmd(old_skill: str, new_skill: str):
         sys.exit(1)
 
 
-@main.command(name="report")
+# Register 'compare' as an alias
+main.add_command(compare_cmd, name="compare")
+
+
+@main.command()
 @click.argument("old_skill", metavar="OLD")
 @click.argument("new_skill", metavar="NEW")
 @click.option("--out-dir", default=".", show_default=True,
               help="Directory to write report files into.")
-def report_cmd(old_skill: str, new_skill: str, out_dir: str):
+def report(old_skill: str, new_skill: str, out_dir: str):
     """Generate JSON and HTML reports for OLD vs NEW skill comparison."""
     result = _run_diff(old_skill, new_skill)
     reports.render_cli(result)
@@ -86,11 +91,11 @@ def report_cmd(old_skill: str, new_skill: str, out_dir: str):
     json_path.write_text(reports.render_json(result), encoding="utf-8")
     html_path.write_text(reports.render_html(result), encoding="utf-8")
 
-    console.print(f"\n[green]v[/green] JSON report -> {json_path}")
-    console.print(f"[green]v[/green] HTML report -> {html_path}\n")
+    console.print(f"\n[green]✓[/green] JSON report → {json_path}")
+    console.print(f"[green]✓[/green] HTML report → {html_path}\n")
 
 
-@main.command(name="version")
+@main.command()
 def version():
     """Print the SkillDiff version."""
     console.print(f"SkillDiff {__version__}")
