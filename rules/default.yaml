@@ -1,0 +1,49 @@
+# SkillDiff Default Risk Rules
+# Loaded by the Risk Engine to assign severity to detected changes.
+# Override by passing --rules path/to/custom.yaml
+
+permissions:
+  shell.execute:
+    severity: Critical
+    recommendation: "Shell execution grants arbitrary code execution. Requires security review."
+  filesystem.write:
+    severity: Critical
+    recommendation: "Filesystem write access can modify or delete data. Requires review."
+  filesystem.read:
+    severity: Medium
+    recommendation: "Filesystem read may expose sensitive files. Verify scope."
+  internet:
+    severity: Medium
+    recommendation: "Internet access enables data exfiltration. Verify domains."
+  database:
+    severity: High
+    recommendation: "Database access can expose or modify sensitive records."
+  clipboard:
+    severity: High
+    recommendation: "Clipboard access can read sensitive user data."
+  camera:
+    severity: High
+    recommendation: "Camera access is privacy-sensitive. Requires explicit user consent."
+  microphone:
+    severity: High
+    recommendation: "Microphone access is privacy-sensitive. Requires explicit user consent."
+
+tools:
+  shell:
+    severity: Critical
+  exec:
+    severity: Critical
+  bash:
+    severity: Critical
+  python:
+    severity: High
+  file_write:
+    severity: Critical
+  email:
+    severity: High
+  send_email:
+    severity: High
+  browser:
+    severity: Medium
+  web_search:
+    severity: Low

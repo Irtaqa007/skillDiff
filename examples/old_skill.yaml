@@ -1,0 +1,28 @@
+metadata:
+  name: report-summarizer
+  version: "1.0.0"
+  author: platform-team
+
+model:
+  name: gpt-4o-mini
+  provider: openai
+  temperature: 0.3
+  context_window: 128000
+
+system_prompt: |
+  You are a report summarizer. Summarize the provided report concisely.
+
+tools:
+  - name: read_file
+  - name: web_search
+
+permissions:
+  - filesystem.read
+
+network:
+  allowed_domains:
+    - api.internal.company.com
+
+resources:
+  - type: file
+    path: /data/reports/
