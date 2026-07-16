@@ -1,65 +1,72 @@
-"""Normalizer — converts raw dicts into SkillModel objects."""
+"""
+normalizer.py — Converts raw skill dicts into SkillModel instances.
+
+All comparison logic operates on SkillModel, never on raw dicts.
+"""
+
 from __future__ import annotations
 from typing import Any
-from .models import SkillModel
+from skilldiff.models import SkillMetadata, SkillModel
 
 
 def normalize(raw: dict[str, Any]) -> SkillModel:
-    """Normalize a raw skill dict into a SkillModel.
-
-    Handles nested or flat structures, missing fields, and type coercion.
-    Never fails on missing fields — uses safe defaults.
     """
-    skill = raw.get("skill", raw)  # support both top-level and nested
+    Normalize a raw skill dictionary into a SkillModel.
 
-    def _as_list(val: Any) -> list:
-        if val is None:
-            return []
-        if isinstance(val, list):
-            return val
-        if isinstance(val, str):
-            return [val]
-        return [val]
+    Unknown fields are preserved in raw for auditability.
+    Missing fields default to safe empty values.
 
-    def _as_dict(val: Any) -> dict:
-        if isinstance(val, dict):
-            return val
-        return {}
+    Args:
+        raw: Dictionary loaded from a YAML or JSON skill file.
 
-    # Normalize tools — support both string names and full dicts
-    raw_tools = _as_list(skill.get("tools"))
-    tools = []
-    for t in raw_tools:
-        if isinstance(t, str):
-            tools.append({"name": t})
-        elif isinstance(t, dict):
-            tools.append(t)
+    Returns:
+        Normalized SkillModel instance.
+    """
+    meta_raw = raw.get("metadata", {}) or {}
+    metadata = SkillMetadata(
+        name=str(meta_raw.get("name", "")),
+        version=str(meta_raw.get("version", "")),
+        description=str(meta_raw.get("description", "")),
+        author=str(meta_raw.get("author", "")),
+        tags=_coerce_list(meta_raw.get("tags")),
+    )
 
-    # Normalize permissions — flatten nested permission dicts
-    raw_perms = skill.get("permissions", [])
-    permissions: list[str] = []
-    if isinstance(raw_perms, dict):
-        for category, items in raw_perms.items():
-            if isinstance(items, list):
-                permissions.extend(f"{category}.{item}" for item in items)
-            elif isinstance(items, bool) and items:
-                permissions.append(category)
-    elif isinstance(raw_perms, list):
-        for p in raw_perms:
-            permissions.append(str(p))
+    model_raw = raw.get("model", {}) or {}
+    model: dict[str, Any] = {
+        "name": str(model_raw.get("name", "")),
+        "provider": str(model_raw.get("provider", "")),
+        "context_window": model_raw.get("context_window"),
+        "temperature": model_raw.get("temperature"),
+    }
+
+    prompt = str(raw.get("prompt", "") or "")
+
+    tools = _coerce_list(raw.get("tools"))
+    permissions = _coerce_list(raw.get("permissions"))
+    resources = _coerce_list(raw.get("resources"))
+
+    memory_raw = raw.get("memory", {}) or {}
+    network_raw = raw.get("network", {}) or {}
+    environment_raw = raw.get("environment", {}) or {}
 
     return SkillModel(
-        metadata=_as_dict(skill.get("metadata") or skill.get("meta")),
-        model=_as_dict(skill.get("model") or skill.get("llm")),
-        prompt={
-            "system": skill.get("system_prompt") or skill.get("prompt", {}).get("system", ""),
-            "user": skill.get("user_prompt") or skill.get("prompt", {}).get("user", ""),
-            "instructions": skill.get("instructions") or skill.get("prompt", {}).get("instructions", ""),
-        },
+        metadata=metadata,
+        model=model,
+        prompt=prompt,
         tools=tools,
         permissions=permissions,
-        resources=_as_list(skill.get("resources")),
-        memory=_as_dict(skill.get("memory")),
-        network=_as_dict(skill.get("network")),
-        environment=_as_dict(skill.get("environment") or skill.get("env")),
+        resources=resources,
+        memory=dict(memory_raw),
+        network=dict(network_raw),
+        environment=dict(environment_raw),
+        raw=raw,
     )
+
+
+def _coerce_list(value: Any) -> list[str]:
+    """Coerce a value to a list of strings, tolerating None and single values."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return [str(value)]
