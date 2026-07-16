@@ -1,7 +1,15 @@
-"""Report Generator — CLI (Rich), JSON, and HTML outputs."""
+"""
+report.py — Report generation for SkillDiff results.
+
+Produces three outputs:
+  - Rich CLI report (terminal)
+  - JSON report (machine-readable)
+  - HTML report (printable enterprise report)
+"""
+
 from __future__ import annotations
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,199 +19,257 @@ from rich.table import Table
 from rich import box
 from rich.text import Text
 
-from .models import DiffResult, Change
+from skilldiff.models import Change, DiffResult
 
 console = Console()
 
 _SEVERITY_COLORS = {
-    "Critical": "bold red",
-    "High": "red",
-    "Medium": "yellow",
-    "Low": "cyan",
-    "Info": "dim",
+    "critical": "bold red",
+    "high": "red",
+    "medium": "yellow",
+    "low": "cyan",
+    "info": "dim",
 }
 
 _RISK_COLORS = {
-    "Critical": "bold red",
-    "High": "red",
-    "Medium": "yellow",
-    "Low": "green",
-    "None": "green",
+    "none": "green",
+    "low": "cyan",
+    "medium": "yellow",
+    "high": "red",
+    "critical": "bold red",
 }
 
 
-def _severity_badge(severity: str) -> Text:
-    color = _SEVERITY_COLORS.get(severity, "white")
-    return Text(f" {severity} ", style=f"{color} on black")
+# ── CLI Report ─────────────────────────────────────────────────────────────────
 
-
-def print_cli_report(result: DiffResult, old_path: str, new_path: str) -> None:
-    """Print a rich, enterprise-grade CLI report."""
-    ts = datetime.now().strftime("%Y-%m-%d %Human:%M:%S")
+def render_cli(result: DiffResult) -> None:
+    """Print a Rich CLI report to stdout."""
 
     # Header
     console.print()
     console.print(Panel(
-        f"[bold white]SkillDiff Report[/bold white]\n"
-        f"[dim]{ts}[/dim]\n\n"
-        f"[dim]Old:[/dim] {old_path}\n"
-        f"[dim]New:[/dim] {new_path}",
+        f"[bold]SkillDiff[/bold] — Behavioral Change Report\n"
+        f"[dim]Old:[/dim] {result.old_path}\n"
+        f"[dim]New:[/dim] {result.new_path}",
+        title="[bold blue]SKILLDIFF[/bold blue]",
         border_style="blue",
-        padding=(1, 2),
     ))
 
     if not result.has_changes:
-        console.print(Panel(
-            "[bold green]✓ No behavioral changes detected.[/bold green]",
-            border_style="green",
-        ))
+        console.print("\n[green]✓ No behavioral changes detected.[/green]\n")
         return
 
-    # Risk score
+    # Risk summary
     risk_color = _RISK_COLORS.get(result.risk_level, "white")
-    console.print(Panel(
-        f"[bold]Risk Score:[/bold] [{risk_color}]{result.risk_score}/100[/{risk_color}]  "
-        f"[bold]Risk Level:[/bold] [{risk_color}]{result.risk_level}[/{risk_color}]\n"
-        f"[dim]{len(result.changes)} change(s) detected — "
-        f"{len(result.critical_changes)} critical, {len(result.high_changes)} high[/dim]",
-        border_style=risk_color,
-        title="[bold]Risk Summary[/bold]",
-    ))
+    console.print(
+        f"\n[bold]Risk Score:[/bold] [{risk_color}]{result.risk_score}[/{risk_color}]  "
+        f"[bold]Risk Level:[/bold] [{risk_color}]{result.risk_level.upper()}[/{risk_color}]  "
+        f"[bold]Changes:[/bold] {len(result.changes)}  "
+        f"[red]Critical: {result.critical_count}[/red]  "
+        f"[yellow]High: {result.high_count}[/yellow]"
+    )
+    console.print()
 
     # Changes table
     table = Table(
         box=box.ROUNDED,
         show_header=True,
         header_style="bold white on dark_blue",
-        border_style="dim",
         expand=True,
     )
-    table.add_column("Category", style="bold", width=14)
-    table.add_column("Field", width=22)
-    table.add_column("Severity", width=10, justify="center")
-    table.add_column("Description")
-    table.add_column("Recommendation", style="dim")
+    table.add_column("Field", style="bold", min_width=20)
+    table.add_column("Type", min_width=10)
+    table.add_column("Severity", min_width=10)
+    table.add_column("Description", ratio=2)
+    table.add_column("Recommendation", ratio=2)
 
-    for change in sorted(result.changes, key=lambda c: list(_SEVERITY_COLORS).index(c.severity)):
+    for change in result.changes:
+        color = _SEVERITY_COLORS.get(change.severity, "white")
         table.add_row(
-            change.category.upper(),
             change.field,
-            _severity_badge(change.severity),
+            change.change_type,
+            f"[{color}]{change.severity.upper()}[/{color}]",
             change.description,
             change.recommendation,
         )
 
-    console.print()
     console.print(table)
     console.print()
 
 
-def to_json(result: DiffResult, old_path: str, new_path: str) -> str:
+# ── JSON Report ────────────────────────────────────────────────────────────────
+
+def render_json(result: DiffResult) -> str:
     """Serialize DiffResult to a JSON string."""
-    def _change_dict(c: Change) -> dict[str, Any]:
+
+    def _change_to_dict(c: Change) -> dict[str, Any]:
         return {
-            "category": c.category,
             "field": c.field,
-            "severity": c.severity,
+            "change_type": c.change_type,
+            "old_value": c.old_value,
+            "new_value": c.new_value,
             "description": c.description,
+            "severity": c.severity,
             "recommendation": c.recommendation,
-            "old_value": str(c.old_value) if c.old_value is not None else None,
-            "new_value": str(c.new_value) if c.new_value is not None else None,
         }
 
-    return json.dumps({
-        "generated_at": datetime.now().isoformat(),
-        "old_skill": old_path,
-        "new_skill": new_path,
+    payload = {
+        "skilldiff_version": "0.1.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "old_path": result.old_path,
+        "new_path": result.new_path,
         "risk_score": result.risk_score,
         "risk_level": result.risk_level,
-        "total_changes": len(result.changes),
-        "changes": [_change_dict(c) for c in result.changes],
-    }, indent=2)
+        "change_count": len(result.changes),
+        "critical_count": result.critical_count,
+        "high_count": result.high_count,
+        "changes": [_change_to_dict(c) for c in result.changes],
+    }
+    return json.dumps(payload, indent=2, default=str)
 
 
-_HTML_TEMPLATE = """<!DOCTYPE html>
+# ── HTML Report ────────────────────────────────────────────────────────────────
+
+_HTML_TEMPLATE = """\
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SkillDiff Report</title>
 <style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         background: #0f1117; color: #e6e9f0; margin: 0; padding: 2rem; }
-  .container { max-width: 1100px; margin: 0 auto; }
-  h1 { color: #fff; font-size: 1.6rem; margin-bottom: 0.25rem; }
-  .meta { color: #6b7280; font-size: 0.85rem; margin-bottom: 2rem; }
-  .risk-card { border-radius: 8px; padding: 1.5rem; margin-bottom: 2rem;
-               border: 1px solid; }
-  .risk-None, .risk-Low { border-color: #22c55e; background: #052e16; }
-  .risk-Medium { border-color: #f59e0b; background: #1c1002; }
-  .risk-High { border-color: #ef4444; background: #1c0202; }
-  .risk-Critical { border-color: #dc2626; background: #1c0000; }
-  .score { font-size: 2rem; font-weight: 700; }
-  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-  th { background: #1e2333; color: #9ca3af; font-size: 0.75rem;
-       text-transform: uppercase; letter-spacing: 0.05em;
-       padding: 0.75rem 1rem; text-align: left; }
-  td { padding: 0.75rem 1rem; border-bottom: 1px solid #1f2937;
-       font-size: 0.875rem; vertical-align: top; }
-  tr:hover td { background: #1a1f2e; }
-  .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px;
-           font-size: 0.75rem; font-weight: 600; }
-  .Critical { background: #7f1d1d; color: #fca5a5; }
-  .High { background: #431407; color: #fdba74; }
-  .Medium { background: #422006; color: #fcd34d; }
-  .Low { background: #052e16; color: #86efac; }
-  .Info { background: #1e3a5f; color: #93c5fd; }
-  .no-changes { text-align: center; padding: 3rem; color: #22c55e; font-size: 1.1rem; }
+         background: #f4f6f9; color: #1a1a2e; font-size: 14px; }
+  header { background: #1a2b4c; color: white; padding: 24px 32px; }
+  header h1 { font-size: 22px; font-weight: 700; letter-spacing: 1px; }
+  header p  { font-size: 12px; opacity: 0.7; margin-top: 4px; }
+  .container { max-width: 1100px; margin: 32px auto; padding: 0 24px; }
+  .summary { background: white; border-radius: 8px; padding: 20px 24px;
+             margin-bottom: 24px; display: flex; gap: 40px;
+             box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .metric label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+                  color: #666; display: block; margin-bottom: 4px; }
+  .metric value { font-size: 28px; font-weight: 700; }
+  .none    { color: #22c55e; }
+  .low     { color: #06b6d4; }
+  .medium  { color: #f59e0b; }
+  .high    { color: #ef4444; }
+  .critical{ color: #dc2626; }
+  table { width: 100%; border-collapse: collapse; background: white;
+          border-radius: 8px; overflow: hidden;
+          box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  th { background: #1a2b4c; color: white; padding: 12px 16px;
+       text-align: left; font-size: 12px; text-transform: uppercase; }
+  td { padding: 12px 16px; border-bottom: 1px solid #f0f0f0;
+       vertical-align: top; font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f8f9fb; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px;
+           font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge-critical { background: #fee2e2; color: #dc2626; }
+  .badge-high     { background: #fee2e2; color: #ef4444; }
+  .badge-medium   { background: #fef3c7; color: #d97706; }
+  .badge-low      { background: #cffafe; color: #0891b2; }
+  .badge-info     { background: #f3f4f6; color: #6b7280; }
+  .no-changes { background: white; border-radius: 8px; padding: 32px;
+                text-align: center; color: #22c55e; font-size: 16px;
+                box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  footer { text-align: center; color: #999; font-size: 11px;
+           margin: 32px 0; }
 </style>
 </head>
 <body>
+<header>
+  <h1>SKILLDIFF — Behavioral Change Report</h1>
+  <p>Generated {{ generated_at }}</p>
+</header>
 <div class="container">
-  <h1>SkillDiff Report</h1>
-  <div class="meta">Generated: {generated_at} &nbsp;|&nbsp;
-    Old: <code>{old_path}</code> &nbsp;|&nbsp; New: <code>{new_path}</code>
+  <div class="summary">
+    <div class="metric">
+      <label>Risk Score</label>
+      <value class="{{ risk_level }}">{{ risk_score }}</value>
+    </div>
+    <div class="metric">
+      <label>Risk Level</label>
+      <value class="{{ risk_level }}">{{ risk_level|upper }}</value>
+    </div>
+    <div class="metric">
+      <label>Changes</label>
+      <value>{{ change_count }}</value>
+    </div>
+    <div class="metric">
+      <label>Critical</label>
+      <value class="critical">{{ critical_count }}</value>
+    </div>
+    <div class="metric">
+      <label>Old Skill</label>
+      <value style="font-size:14px;margin-top:6px">{{ old_path }}</value>
+    </div>
+    <div class="metric">
+      <label>New Skill</label>
+      <value style="font-size:14px;margin-top:6px">{{ new_path }}</value>
+    </div>
   </div>
-  <div class="risk-card risk-{risk_level}">
-    <div class="score">{risk_score}/100</div>
-    <div>Risk Level: <strong>{risk_level}</strong> &nbsp;|&nbsp;
-      {total_changes} change(s)</div>
-  </div>
-  {body}
+
+  {% if changes %}
+  <table>
+    <thead>
+      <tr>
+        <th>Field</th>
+        <th>Type</th>
+        <th>Severity</th>
+        <th>Description</th>
+        <th>Recommendation</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in changes %}
+      <tr>
+        <td><strong>{{ c.field }}</strong></td>
+        <td>{{ c.change_type }}</td>
+        <td><span class="badge badge-{{ c.severity }}">{{ c.severity }}</span></td>
+        <td>{{ c.description }}</td>
+        <td>{{ c.recommendation }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="no-changes">✓ No behavioral changes detected.</div>
+  {% endif %}
 </div>
+<footer>SkillDiff 0.1.0 — Air-gap compatible • No LLM required • Deterministic</footer>
 </body>
-</html>"""
+</html>
+"""
 
 
-def to_html(result: DiffResult, old_path: str, new_path: str) -> str:
-    """Generate an HTML report."""
-    if not result.has_changes:
-        body = '<div class="no-changes">✓ No behavioral changes detected.</div>'
-    else:
-        rows = ""
-        for c in sorted(result.changes, key=lambda x: list(_SEVERITY_COLORS).index(x.severity)):
-            rows += (
-                f"<tr><td>{c.category.upper()}</td>"
-                f"<td><code>{c.field}</code></td>"
-                f"<td><span class='badge {c.severity}'>{c.severity}</span></td>"
-                f"<td>{c.description}</td>"
-                f"<td style='color:#9ca3af'>{c.recommendation}</td></tr>\n"
-            )
-        body = (
-            "<table><thead><tr>"
-            "<th>Category</th><th>Field</th><th>Severity</th>"
-            "<th>Description</th><th>Recommendation</th>"
-            "</tr></thead><tbody>"
-            + rows
-            + "</tbody></table>"
-        )
+def render_html(result: DiffResult) -> str:
+    """Render an HTML report for the diff result."""
+    from jinja2 import Environment
 
-    return _HTML_TEMPLATE.format(
-        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        old_path=old_path,
-        new_path=new_path,
+    env = Environment(autoescape=True)
+    template = env.from_string(_HTML_TEMPLATE)
+
+    changes_dicts = [
+        {
+            "field": c.field,
+            "change_type": c.change_type,
+            "severity": c.severity,
+            "description": c.description,
+            "recommendation": c.recommendation,
+        }
+        for c in result.changes
+    ]
+
+    return template.render(
+        generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         risk_score=result.risk_score,
         risk_level=result.risk_level,
-        total_changes=len(result.changes),
-        body=body,
+        change_count=len(result.changes),
+        critical_count=result.critical_count,
+        old_path=result.old_path,
+        new_path=result.new_path,
+        changes=changes_dicts,
     )
