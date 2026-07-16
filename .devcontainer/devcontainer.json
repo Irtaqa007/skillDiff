@@ -1,0 +1,14 @@
+{
+  "name": "SkillDiff Dev Environment",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -e . && echo 'SkillDiff ready. Run: python -m skilldiff.cli compare examples/old_skill.yaml examples/new_skill.yaml'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.pylint"
+      ]
+    }
+  },
+  "forwardPorts": []
+}
