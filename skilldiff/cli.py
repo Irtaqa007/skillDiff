@@ -1,4 +1,12 @@
-"""CLI entry point for SkillDiff."""
+"""
+cli.py — Command-line interface for SkillDiff.
+
+Commands:
+  skilldiff compare <old> <new>   — Compare two skill files, print CLI report
+  skilldiff report <old> <new>    — Generate JSON + HTML reports to disk
+  skilldiff version               — Print version
+"""
+
 from __future__ import annotations
 import sys
 from pathlib import Path
@@ -6,77 +14,83 @@ from pathlib import Path
 import click
 from rich.console import Console
 
-from .utils import diff_files
-from .report import print_cli_report, to_json, to_html
-from .loader import LoadError
+from skilldiff import __version__
+from skilldiff.loader import LoadError, load_skill_file
+from skilldiff.normalizer import normalize
+from skilldiff.semantic_engine import compare as semantic_compare
+from skilldiff.risk_engine import score
+from skilldiff import report as reports
 
 console = Console()
-__version__ = "0.1.0"
+err_console = Console(stderr=True)
+
+
+def _run_diff(old_path: str, new_path: str):
+    """Shared pipeline: load -> normalize -> compare -> score."""
+    try:
+        old_raw = load_skill_file(old_path)
+        new_raw = load_skill_file(new_path)
+    except LoadError as e:
+        err_console.print(f"[bold red]Error:[/bold red] {e}")
+        sys.exit(1)
+
+    old_model = normalize(old_raw)
+    new_model = normalize(new_raw)
+
+    result = semantic_compare(old_model, new_model, old_path, new_path)
+    result = score(result)
+    return result
 
 
 @click.group()
-@click.version_option(version=__version__, prog_name="skilldiff")
-def cli() -> None:
-    """SkillDiff — compare AI skill versions and detect behavioral changes."""
+def main():
+    """SkillDiff — Behavioral diff for AI skills.
 
+    Detects what an AI can now do differently, assesses security implications,
+    and generates enterprise-ready risk reports.
 
-@cli.command()
-@click.argument("old_skill", type=click.Path(exists=True))
-@click.argument("new_skill", type=click.Path(exists=True))
-@click.option("--rules", default=None, help="Path to custom rules YAML file.")
-@click.option("--json", "output_json", is_flag=True, help="Output JSON report to stdout.")
-@click.option("--html", "output_html", default=None, help="Write HTML report to file.")
-def compare(old_skill: str, new_skill: str, rules: str | None,
-            output_json: bool, output_html: str | None) -> None:
-    """Compare two skill files and report behavioral changes.
-
-    \b
-    Examples:
-      skilldiff compare old.yaml new.yaml
-      skilldiff compare old.yaml new.yaml --json
-      skilldiff compare old.yaml new.yaml --html report.html
+    Air-gap compatible. No LLM required. Deterministic.
     """
-    try:
-        result = diff_files(old_skill, new_skill, rules_path=rules)
-    except LoadError as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        sys.exit(1)
 
-    if output_json:
-        click.echo(to_json(result, old_skill, new_skill))
-        return
 
-    if output_html:
-        html = to_html(result, old_skill, new_skill)
-        Path(output_html).write_text(html, encoding="utf-8")
-        console.print(f"[green]HTML report written to:[/green] {output_html}")
+@main.command(name="compare")
+@click.argument("old_skill", metavar="OLD")
+@click.argument("new_skill", metavar="NEW")
+def compare_cmd(old_skill: str, new_skill: str):
+    """Compare OLD and NEW skill files and print a behavioral change report."""
+    result = _run_diff(old_skill, new_skill)
+    reports.render_cli(result)
 
-    print_cli_report(result, old_skill, new_skill)
-
-    # Exit code 1 if critical changes found
-    if result.critical_changes:
+    if result.risk_level in ("critical", "high"):
+        sys.exit(2)
+    elif result.has_changes:
         sys.exit(1)
 
 
-@cli.command()
-@click.argument("old_skill", type=click.Path(exists=True))
-@click.argument("new_skill", type=click.Path(exists=True))
-@click.option("--output", "-o", default="report.html", help="Output HTML file path.")
-@click.option("--rules", default=None, help="Path to custom rules YAML file.")
-def report(old_skill: str, new_skill: str, output: str, rules: str | None) -> None:
-    """Generate an HTML report for two skill files.
+@main.command(name="report")
+@click.argument("old_skill", metavar="OLD")
+@click.argument("new_skill", metavar="NEW")
+@click.option("--out-dir", default=".", show_default=True,
+              help="Directory to write report files into.")
+def report_cmd(old_skill: str, new_skill: str, out_dir: str):
+    """Generate JSON and HTML reports for OLD vs NEW skill comparison."""
+    result = _run_diff(old_skill, new_skill)
+    reports.render_cli(result)
 
-    \b
-    Example:
-      skilldiff report old.yaml new.yaml -o report.html
-    """
-    try:
-        result = diff_files(old_skill, new_skill, rules_path=rules)
-    except LoadError as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        sys.exit(1)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
 
-    html = to_html(result, old_skill, new_skill)
-    Path(output).write_text(html, encoding="utf-8")
-    console.print(f"[green]✓ HTML report written to:[/green] {output}")
-    print_cli_report(result, old_skill, new_skill)
+    json_path = out / "skilldiff_report.json"
+    html_path = out / "skilldiff_report.html"
+
+    json_path.write_text(reports.render_json(result), encoding="utf-8")
+    html_path.write_text(reports.render_html(result), encoding="utf-8")
+
+    console.print(f"\n[green]v[/green] JSON report -> {json_path}")
+    console.print(f"[green]v[/green] HTML report -> {html_path}\n")
+
+
+@main.command(name="version")
+def version():
+    """Print the SkillDiff version."""
+    console.print(f"SkillDiff {__version__}")
