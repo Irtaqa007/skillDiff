@@ -1,209 +1,246 @@
-"""Semantic Change Engine — detects behavioral differences between two SkillModels."""
+"""
+semantic_engine.py — Detects behavioral changes between two SkillModel instances.
+
+Compares normalized models field by field and produces Change objects
+describing what the AI can now do differently. No AI or LLM required.
+"""
+
 from __future__ import annotations
-from .models import SkillModel, Change, DiffResult
+from skilldiff.models import Change, DiffResult, SkillModel
 
 
-def _compare_prompts(old: SkillModel, new: SkillModel, changes: list[Change]) -> None:
-    """Detect capability expansion or reduction in prompts."""
-    fields = [
-        ("system", "System prompt"),
-        ("user", "User prompt template"),
-        ("instructions", "Instructions"),
-    ]
-    for key, label in fields:
-        old_val = old.prompt.get(key, "") or ""
-        new_val = new.prompt.get(key, "") or ""
-        if old_val == new_val:
-            continue
-        # Detect expansion vs reduction
-        old_len = len(old_val)
-        new_len = len(new_val)
-        if new_len > old_len:
-            direction = "expanded"
-            description = f"{label} expanded — AI may have new capabilities"
-        elif new_len < old_len:
-            direction = "reduced"
-            description = f"{label} reduced — AI may have fewer capabilities"
-        else:
-            direction = "modified"
-            description = f"{label} modified with same length — behavior may have changed"
+def compare(old: SkillModel, new: SkillModel, old_path: str, new_path: str) -> DiffResult:
+    """
+    Compare two normalized skill models and return a DiffResult.
+
+    Args:
+        old: Normalized old skill version.
+        new: Normalized new skill version.
+        old_path: Path string for old file (for reporting).
+        new_path: Path string for new file (for reporting).
+
+    Returns:
+        DiffResult containing all detected behavioral changes.
+    """
+    result = DiffResult(old_path=old_path, new_path=new_path)
+
+    result.changes.extend(_compare_prompt(old.prompt, new.prompt))
+    result.changes.extend(_compare_list_field("tools", old.tools, new.tools))
+    result.changes.extend(_compare_permissions(old.permissions, new.permissions))
+    result.changes.extend(_compare_model(old.model, new.model))
+    result.changes.extend(_compare_list_field("resources", old.resources, new.resources))
+    result.changes.extend(_compare_network(old.network, new.network))
+
+    return result
+
+
+# ── Prompt ────────────────────────────────────────────────────────────────────
+
+def _compare_prompt(old: str, new: str) -> list[Change]:
+    changes: list[Change] = []
+    if old == new:
+        return changes
+
+    old_words = set(old.lower().split())
+    new_words = set(new.lower().split())
+    added_words = new_words - old_words
+
+    # Detect capability expansion keywords
+    expansion_signals = {
+        "send", "write", "delete", "execute", "run", "deploy", "publish",
+        "create", "modify", "update", "upload", "download", "access",
+        "read", "fetch", "call", "invoke", "post", "submit", "share",
+    }
+    expansions = expansion_signals & added_words
+
+    if expansions:
+        description = (
+            f"Prompt now contains action verbs not present in the old version: "
+            f"{', '.join(sorted(expansions))}. This may indicate capability expansion."
+        )
+        severity = "high"
+        recommendation = (
+            "Review the new prompt carefully. Capability-expanding verbs suggest "
+            "the skill may now perform actions beyond its original scope."
+        )
+    else:
+        description = "Prompt text has changed. Review for unintended behavioral shifts."
+        severity = "medium"
+        recommendation = "Compare old and new prompt side by side to verify intent is preserved."
+
+    changes.append(Change(
+        field="prompt",
+        change_type="modified",
+        old_value=old[:200] + ("…" if len(old) > 200 else ""),
+        new_value=new[:200] + ("…" if len(new) > 200 else ""),
+        description=description,
+        severity=severity,
+        recommendation=recommendation,
+    ))
+    return changes
+
+
+# ── List fields (tools, resources) ────────────────────────────────────────────
+
+def _compare_list_field(field_name: str, old: list[str], new: list[str]) -> list[Change]:
+    changes: list[Change] = []
+    old_set, new_set = set(old), set(new)
+
+    for item in sorted(new_set - old_set):
         changes.append(Change(
-            category="prompt",
-            field=key,
-            old_value=old_val[:120] + "..." if len(old_val) > 120 else old_val,
-            new_value=new_val[:120] + "..." if len(new_val) > 120 else new_val,
-            description=description,
-            severity="Medium",
-            recommendation=f"Review {label.lower()} changes carefully before deploying.",
-        ))
-
-
-def _compare_tools(old: SkillModel, new: SkillModel, changes: list[Change]) -> None:
-    """Detect added, removed, or modified tools."""
-    old_names = old.tool_names
-    new_names = new.tool_names
-
-    added = new_names - old_names
-    removed = old_names - new_names
-    common = old_names & new_names
-
-    for name in sorted(added):
-        changes.append(Change(
-            category="tools",
-            field=name,
+            field=field_name,
+            change_type="added",
             old_value=None,
-            new_value=name,
-            description=f"Tool '{name}' was added — new capability granted",
-            severity="High",
-            recommendation=f"Verify that '{name}' is intentionally granted and follows least-privilege.",
+            new_value=item,
+            description=f"New {field_name[:-1] if field_name.endswith('s') else field_name} added: '{item}'.",
+            severity="medium",
+            recommendation=f"Verify that '{item}' is intentionally granted and scoped correctly.",
         ))
 
-    for name in sorted(removed):
+    for item in sorted(old_set - new_set):
         changes.append(Change(
-            category="tools",
-            field=name,
-            old_value=name,
+            field=field_name,
+            change_type="removed",
+            old_value=item,
             new_value=None,
-            description=f"Tool '{name}' was removed — capability revoked",
-            severity="Low",
-            recommendation=f"Confirm removal of '{name}' is intentional.",
+            description=f"'{item}' removed from {field_name}.",
+            severity="info",
+            recommendation=f"Confirm removal of '{item}' is intentional and does not break downstream dependencies.",
         ))
 
-    # Check for modified tool definitions
-    old_tool_map = {t.get("name", ""): t for t in old.tools}
-    new_tool_map = {t.get("name", ""): t for t in new.tools}
-    for name in sorted(common):
-        if old_tool_map.get(name) != new_tool_map.get(name):
-            changes.append(Change(
-                category="tools",
-                field=name,
-                old_value=old_tool_map.get(name),
-                new_value=new_tool_map.get(name),
-                description=f"Tool '{name}' definition was modified",
-                severity="Medium",
-                recommendation=f"Review changes to '{name}' tool definition.",
-            ))
+    return changes
 
 
-def _compare_permissions(old: SkillModel, new: SkillModel, changes: list[Change]) -> None:
-    """Detect added or removed permissions."""
-    old_perms = old.permission_set
-    new_perms = new.permission_set
+# ── Permissions ───────────────────────────────────────────────────────────────
 
-    for perm in sorted(new_perms - old_perms):
+# Permissions with elevated risk when added
+_HIGH_RISK_PERMISSIONS = {
+    "shell.execute", "filesystem.write", "camera", "microphone",
+    "clipboard.write", "database.write", "internet",
+}
+
+_MEDIUM_RISK_PERMISSIONS = {
+    "filesystem.read", "database.read", "clipboard.read", "network",
+}
+
+
+def _compare_permissions(old: list[str], new: list[str]) -> list[Change]:
+    changes: list[Change] = []
+    old_set, new_set = set(old), set(new)
+
+    for perm in sorted(new_set - old_set):
+        if perm in _HIGH_RISK_PERMISSIONS:
+            severity = "critical"
+            recommendation = (
+                f"Permission '{perm}' grants significant system access. "
+                "Require explicit security review before deploying."
+            )
+        elif perm in _MEDIUM_RISK_PERMISSIONS:
+            severity = "high"
+            recommendation = (
+                f"Permission '{perm}' grants data access. "
+                "Verify it is scoped to the minimum required data."
+            )
+        else:
+            severity = "medium"
+            recommendation = f"Review the scope and necessity of permission '{perm}'."
+
         changes.append(Change(
-            category="permissions",
-            field=perm,
+            field="permissions",
+            change_type="added",
             old_value=None,
             new_value=perm,
-            description=f"Permission '{perm}' was granted",
-            severity="High",
-            recommendation=f"Verify '{perm}' is required and follows least-privilege.",
+            description=f"Permission granted: '{perm}'.",
+            severity=severity,
+            recommendation=recommendation,
         ))
 
-    for perm in sorted(old_perms - new_perms):
+    for perm in sorted(old_set - new_set):
         changes.append(Change(
-            category="permissions",
-            field=perm,
+            field="permissions",
+            change_type="removed",
             old_value=perm,
             new_value=None,
-            description=f"Permission '{perm}' was revoked",
-            severity="Low",
-            recommendation=f"Confirm revocation of '{perm}' is intentional.",
+            description=f"Permission revoked: '{perm}'.",
+            severity="info",
+            recommendation="Confirm removal is intentional. Ensure skill still functions correctly.",
         ))
 
+    return changes
 
-def _compare_model(old: SkillModel, new: SkillModel, changes: list[Change]) -> None:
-    """Detect model, provider, context window, or temperature changes."""
-    fields = [
-        ("name", "Model name", "High"),
-        ("provider", "Model provider", "High"),
-        ("context_window", "Context window", "Medium"),
-        ("temperature", "Temperature", "Medium"),
-        ("max_tokens", "Max tokens", "Low"),
-        ("version", "Model version", "Low"),
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+
+def _compare_model(old: dict, new: dict) -> list[Change]:
+    changes: list[Change] = []
+
+    checks = [
+        ("name", "Model changed", "high",
+         "A different model may have different capabilities, safety properties, and failure modes."),
+        ("provider", "Provider changed", "high",
+         "Changing provider affects data residency, compliance posture, and API behavior."),
+        ("context_window", "Context window changed", "low",
+         "Larger context windows may allow ingestion of more data than intended."),
+        ("temperature", "Temperature changed", "low",
+         "Higher temperature increases output variability and unpredictability."),
     ]
-    for key, label, severity in fields:
-        old_val = old.model.get(key)
-        new_val = new.model.get(key)
-        if old_val != new_val and not (old_val is None and new_val is None):
+
+    for key, desc, severity, recommendation in checks:
+        old_val = old.get(key)
+        new_val = new.get(key)
+        if old_val != new_val and not (old_val in (None, "") and new_val in (None, "")):
             changes.append(Change(
-                category="model",
-                field=key,
+                field=f"model.{key}",
+                change_type="modified",
                 old_value=old_val,
                 new_value=new_val,
-                description=f"{label} changed: {old_val!r} → {new_val!r}",
+                description=f"{desc}: '{old_val}' → '{new_val}'.",
                 severity=severity,
-                recommendation=f"Validate behavior with new {label.lower()} before production deployment.",
+                recommendation=recommendation,
             ))
 
+    return changes
 
-def _compare_network(old: SkillModel, new: SkillModel, changes: list[Change]) -> None:
-    """Detect new domains, removed domains, or modified endpoints."""
-    old_domains = set(old.network.get("allowed_domains", []))
-    new_domains = set(new.network.get("allowed_domains", []))
+
+# ── Network ───────────────────────────────────────────────────────────────────
+
+def _compare_network(old: dict, new: dict) -> list[Change]:
+    changes: list[Change] = []
+
+    old_domains = set(_coerce_list(old.get("allowed_domains", [])))
+    new_domains = set(_coerce_list(new.get("allowed_domains", [])))
 
     for domain in sorted(new_domains - old_domains):
         changes.append(Change(
-            category="network",
-            field=domain,
+            field="network.allowed_domains",
+            change_type="added",
             old_value=None,
             new_value=domain,
-            description=f"Network access to '{domain}' was added",
-            severity="Medium",
-            recommendation=f"Verify '{domain}' is a trusted and necessary endpoint.",
+            description=f"New network domain allowed: '{domain}'.",
+            severity="high",
+            recommendation=(
+                f"Verify '{domain}' is a trusted endpoint. "
+                "New outbound domains may enable data exfiltration."
+            ),
         ))
 
     for domain in sorted(old_domains - new_domains):
         changes.append(Change(
-            category="network",
-            field=domain,
+            field="network.allowed_domains",
+            change_type="removed",
             old_value=domain,
             new_value=None,
-            description=f"Network access to '{domain}' was removed",
-            severity="Low",
-            recommendation="Confirm this domain removal is intentional.",
+            description=f"Network domain removed: '{domain}'.",
+            severity="info",
+            recommendation="Confirm removal is intentional.",
         ))
 
-
-def _compare_resources(old: SkillModel, new: SkillModel, changes: list[Change]) -> None:
-    """Detect changes to files, databases, or knowledge sources."""
-    old_res = {str(r): r for r in old.resources}
-    new_res = {str(r): r for r in new.resources}
-
-    for key in sorted(set(new_res) - set(old_res)):
-        changes.append(Change(
-            category="resources",
-            field=key,
-            old_value=None,
-            new_value=new_res[key],
-            description=f"Resource added: {key}",
-            severity="Medium",
-            recommendation="Verify the new resource is intentionally accessible.",
-        ))
-
-    for key in sorted(set(old_res) - set(new_res)):
-        changes.append(Change(
-            category="resources",
-            field=key,
-            old_value=old_res[key],
-            new_value=None,
-            description=f"Resource removed: {key}",
-            severity="Low",
-            recommendation="Confirm resource removal is intentional.",
-        ))
+    return changes
 
 
-def compare(old: SkillModel, new: SkillModel) -> DiffResult:
-    """Compare two normalized SkillModels and return a DiffResult."""
-    changes: list[Change] = []
-
-    _compare_prompts(old, new, changes)
-    _compare_tools(old, new, changes)
-    _compare_permissions(old, new, changes)
-    _compare_model(old, new, changes)
-    _compare_network(old, new, changes)
-    _compare_resources(old, new, changes)
-
-    result = DiffResult(old_skill=old, new_skill=new, changes=changes)
-    return result
+def _coerce_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return [str(value)]
