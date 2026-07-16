@@ -1,72 +1,71 @@
-"""Risk Engine — scores DiffResult using deterministic YAML-based rules."""
+"""
+risk_engine.py — Deterministic risk scoring from detected changes.
+
+Loads severity weights from rules/risk_policy.yaml.
+No AI. No LLM. Pure rule-based scoring.
+"""
+
 from __future__ import annotations
-import yaml
 from pathlib import Path
-from .models import DiffResult, Change
+import yaml
+from skilldiff.models import Change, DiffResult
 
-_DEFAULT_RULES_PATH = Path(__file__).parent.parent / "rules" / "default.yaml"
-
-_SEVERITY_SCORE = {
-    "Critical": 40,
-    "High": 20,
-    "Medium": 10,
-    "Low": 2,
-    "Info": 0,
-}
-
-_RISK_LEVELS = [
-    (80, "Critical"),
-    (50, "High"),
-    (20, "Medium"),
-    (1,  "Low"),
-    (0,  "None"),
-]
+# Default rules path — can be overridden
+DEFAULT_RULES_PATH = Path(__file__).parent.parent / "rules" / "risk_policy.yaml"
 
 
-def _load_rules(rules_path: Path | None = None) -> dict:
-    """Load risk rules from YAML. Falls back to defaults if path not given."""
-    path = rules_path or _DEFAULT_RULES_PATH
-    if path.exists():
-        with open(path, encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    return {}
+def _load_policy(rules_path: Path | None = None) -> dict:
+    path = rules_path or DEFAULT_RULES_PATH
+    if not path.exists():
+        return _default_policy()
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or _default_policy()
 
 
-def _apply_rules(change: Change, rules: dict) -> None:
-    """Apply YAML rules to upgrade severity of a change in-place."""
-    permission_rules = rules.get("permissions", {})
-    tool_rules = rules.get("tools", {})
-
-    if change.category == "permissions":
-        for pattern, config in permission_rules.items():
-            if pattern in change.field or change.field.startswith(pattern):
-                severity = config.get("severity", change.severity)
-                recommendation = config.get("recommendation", change.recommendation)
-                change.severity = severity
-                if recommendation:
-                    change.recommendation = recommendation
-
-    elif change.category == "tools":
-        for pattern, config in tool_rules.items():
-            if pattern in change.field:
-                severity = config.get("severity", change.severity)
-                change.severity = severity
+def _default_policy() -> dict:
+    return {
+        "severity_weights": {
+            "critical": 40,
+            "high": 20,
+            "medium": 10,
+            "low": 5,
+            "info": 0,
+        },
+        "thresholds": {
+            "none": 0,
+            "low": 10,
+            "medium": 25,
+            "high": 50,
+            "critical": 80,
+        },
+    }
 
 
 def score(result: DiffResult, rules_path: Path | None = None) -> DiffResult:
-    """Apply risk rules to all changes and compute overall risk score."""
-    rules = _load_rules(rules_path)
+    """
+    Calculate and attach a risk score and risk level to a DiffResult.
 
-    total = 0
-    for change in result.changes:
-        _apply_rules(change, rules)
-        total += _SEVERITY_SCORE.get(change.severity, 0)
+    Modifies result in place and returns it.
 
-    result.risk_score = min(total, 100)
+    Args:
+        result: DiffResult with changes populated by semantic_engine.
+        rules_path: Optional override for the risk policy YAML path.
 
-    for threshold, level in _RISK_LEVELS:
-        if total >= threshold:
-            result.risk_level = level
-            break
+    Returns:
+        The same DiffResult with risk_score and risk_level populated.
+    """
+    policy = _load_policy(rules_path)
+    weights: dict[str, int] = policy.get("severity_weights", _default_policy()["severity_weights"])
+    thresholds: dict[str, int] = policy.get("thresholds", _default_policy()["thresholds"])
+
+    total = sum(weights.get(change.severity, 0) for change in result.changes)
+    result.risk_score = total
+
+    # Determine risk level from thresholds (highest threshold not exceeded)
+    level = "none"
+    for lvl in ("low", "medium", "high", "critical"):
+        if total >= thresholds.get(lvl, 9999):
+            level = lvl
+    result.risk_level = level
 
     return result
